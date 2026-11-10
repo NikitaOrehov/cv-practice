@@ -94,8 +94,6 @@ class FadeColorFilter(ImageFilter):
         faded = image * (1 - self.factor) + gray_3d * self.factor
         return np.clip(faded, 0, 255).astype(np.uint8)
 
-import numpy as np
-
 class FilmSimulationFilter(ImageFilter):
     def apply_filter(self, image):
         b = image[:, :, 0].astype(float)
@@ -104,22 +102,16 @@ class FilmSimulationFilter(ImageFilter):
         
         ir_light = r * 0.3 + g * 0.7
         
-        # 3. Поднимаем контраст для эффекта «серебряного» свечения листьев
         ir_light = (ir_light - 128) * 1.5 + 128
         ir_light = np.clip(ir_light, 0, 255).astype(np.uint8)
         
-        # 4. Добавляем мягкую подложку для теней (аналоговая вуаль), чтобы они не были черными
         shadow_r = np.full_like(ir_light, 20)
         
-        # 5. Собираем каналы в правильном BGR порядке, чтобы на выходе получить красный цвет:
-        # Чтобы картинка была красной, Синий и Зеленый каналы должны быть темными (зануляем их)
         blue_channel = np.zeros_like(ir_light)
         green_channel = np.zeros_like(ir_light)
         
-        # Направляем основной ИК-сигнал строго в Красный канал
         red_channel = np.clip(ir_light.astype(int) + shadow_r, 0, 255).astype(np.uint8)
         
-        # Собираем финальный массив в исходном формате BGR
         return np.stack([blue_channel, green_channel, red_channel], axis=-1)
 
 
@@ -190,24 +182,33 @@ class ScratchNoiseFilter(ImageFilter):
 class NeonFilter(ImageFilter):
     def __init__(
         self,
-        neon_strength: float = 1.5,
         neon_blur: float = 0.8,
+        core_gamma: float = 0.65,
+        core_threshold_low: float = 0.03,
+        core_threshold_high: float = 0.28,
+        core_brightness: float = 1.8,
+        aura_brightness: float = 1.2,
+        aura_scale: float = 8.0,
         neon_color=(255, 0, 255),
         tint=(120, 0, 80),
-        glow_inner: float = 0.1,        # было 0.9
-        glow_outer: float = 1.5,         # было 0.7
-        glow_inner_scale: float = 3.0,   # было 2.0 — сильнее размытие ближнего ореола
-        glow_outer_scale: float = 6.0,   # было 5.0
+        tint_strength: float = 1.0,
+        darken: float = 0.22,
+        add_glow: bool = False,
+        master_strength: float = 1.0,
     ):
-        self.strength = float(neon_strength)
         self.blur_factor = float(neon_blur)
+        self.core_gamma = float(core_gamma)
+        self.core_threshold_low = float(core_threshold_low)
+        self.core_threshold_high = float(core_threshold_high)
+        self.core_brightness = float(core_brightness)
+        self.aura_brightness = float(aura_brightness)
+        self.aura_scale = float(aura_scale)
         self.color = self._norm_color(neon_color)
         self.tint = self._norm_color(tint)
-
-        self.glow_inner = float(glow_inner)
-        self.glow_outer = float(glow_outer)
-        self.glow_inner_scale = float(glow_inner_scale)
-        self.glow_outer_scale = float(glow_outer_scale)
+        self.tint_strength = float(tint_strength)
+        self.darken = float(np.clip(darken, 0.0, 1.0))
+        self.add_glow = bool(add_glow)
+        self.master_strength = float(master_strength)
 
     @staticmethod
     def _norm_color(c):
@@ -231,7 +232,6 @@ class NeonFilter(ImageFilter):
         pad = [(0, 0)] * img.ndim
         pad[axis] = (r, r)
         p = np.pad(img, pad, mode="edge")
-
         out = np.zeros_like(img, dtype=np.float32)
         for i, w in enumerate(kernel):
             sl = [slice(None)] * img.ndim
@@ -251,7 +251,6 @@ class NeonFilter(ImageFilter):
     @staticmethod
     def _sobel(gray):
         p = np.pad(gray.astype(np.float32), 1, mode="edge")
-
         gx = (
             p[:-2, 2:] + 2 * p[1:-1, 2:] + p[2:, 2:]
             - p[:-2, :-2] - 2 * p[1:-1, :-2] - p[2:, :-2]
@@ -269,21 +268,16 @@ class NeonFilter(ImageFilter):
         img = image.astype(np.float32)
         if img.shape[2] == 4:
             img = img[:, :, :3]
-
         if img.max() > 1.0:
             img /= 255.0
 
-        # Яркость
         lum = (
             0.114 * img[:, :, 0]
             + 0.587 * img[:, :, 1]
             + 0.299 * img[:, :, 2]
         )
 
-        # Слегка размываем перед выделением контуров, чтобы не ловить шум
         smooth = self._blur(lum, max(0.6, self.blur_factor))
-
-        # Контуры
         gx, gy = self._sobel(smooth)
         mag = np.sqrt(gx * gx + gy * gy)
 
@@ -291,40 +285,36 @@ class NeonFilter(ImageFilter):
         if max_v > 1e-8:
             mag /= max_v
 
-        # “Ядро” неона — тонкие контуры
-        edge = np.clip((mag - 0.03) / 0.25, 0.0, 1.0)
-        edge = edge ** 0.65
-        core = np.clip(edge * self.strength, 0.0, 1.0)
+        lo = self.core_threshold_low
+        hi = max(self.core_threshold_high, lo + 1e-6)
+        edge = np.clip((mag - lo) / (hi - lo), 0.0, 1.0)
 
-        # Свечение вокруг контуров: несколько радиусов размытия
-        glow_1 = self._blur(core, max(0.8, self.blur_factor * self.glow_inner_scale))
-        glow_2 = self._blur(core, max(2.0, self.blur_factor * self.glow_outer_scale))
-        glow = np.clip((self.glow_inner * glow_1 + self.glow_outer * glow_2) * self.strength,0.0, 1.0)
+        core = edge ** self.core_gamma
 
-        # Широкая аура
-        aura = self._blur(core, max(3.0, self.blur_factor * 10.0))
-        aura = np.clip(aura * self.strength * 0.8, 0.0, 1.0)
+        aura = self._blur(core, max(1.5, self.blur_factor * self.aura_scale))
 
-        # Затемнённая и подкрашенная база
-        tint = self.tint.reshape(1, 1, 3)
-        ambient = (0.12 + 0.35 * lum[:, :, None]) * tint
-        base = np.clip(img * 0.22 + ambient, 0.0, 1.0)
+        if self.darken > 0.0:
+            tint = self.tint.reshape(1, 1, 3)
+            ambient = (0.12 + 0.35 * lum[:, :, None]) * tint * self.tint_strength
+            darkened = img * (1.0 - self.darken)
+            base = np.clip(darkened + ambient * self.darken, 0.0, 1.0)
+        else:
+            base = np.clip(img, 0.0, 1.0)
 
-        # Цветной неоновый слой
         color = self.color.reshape(1, 1, 3)
         neon_layer = color * (
-            core[:, :, None] * 1.8
-            + glow[:, :, None] * 1.15
-            + aura[:, :, None] * 0.75
+            core[:, :, None] * self.core_brightness
+            + aura[:, :, None] * self.aura_brightness
         )
         neon_layer = np.clip(neon_layer, 0.0, 1.0)
 
-        # Screen-смешивание
-        out = 1.0 - (1.0 - base) * (1.0 - neon_layer)
-        out = np.clip(out * 255.0, 0.0, 255.0).astype(np.uint8)
+        if self.add_glow:
+            out = np.clip(base + neon_layer, 0.0, 1.0)
+        else:
+            out = 1.0 - (1.0 - base) * (1.0 - neon_layer)
 
-        return out
-
+        out = np.clip(out * self.master_strength, 0.0, 1.0)
+        return np.clip(out * 255.0, 0.0, 255.0).astype(np.uint8)
 
 
 
