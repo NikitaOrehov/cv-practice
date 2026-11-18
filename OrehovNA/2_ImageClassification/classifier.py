@@ -5,7 +5,6 @@ import pickle
 
 class Classifier:
     def __init__(self, kernel='linear', C=1.0):
-        # Линейный SVM хорошо работает с BoW-гистограммами
         self.model = SVC(kernel=kernel, C=C, probability=True, random_state=42)
 
     def train(self, X_train, y_train):

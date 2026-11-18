@@ -7,28 +7,22 @@ import torchvision.transforms as transforms
 from abc import ABC, abstractmethod
 
 class BaseFeatureExtractor(ABC):
-    """Абстрактный базовый класс для всех экстракторов."""
     @abstractmethod
     def extract(self, image: np.ndarray) -> np.ndarray:
-        """Принимает изображение (H, W, 3) в BGR, возвращает массив дескрипторов (N, D)."""
         pass
 
 class SIFTExtractor(BaseFeatureExtractor):
-    """Классический экстрактор на основе SIFT (OpenCV)."""
     def __init__(self):
         self.sift = cv2.SIFT_create()
 
     def extract(self, image: np.ndarray) -> np.ndarray:
-        # SIFT работает с градациями серого
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         keypoints, descriptors = self.sift.detectAndCompute(gray, None)
-        # Если признаков не найдено, возвращаем пустой массив
         if descriptors is None:
             return np.array([])
         return descriptors  # shape: (N, 128)
 
 class ORBExtractor(BaseFeatureExtractor):
-    """Классический экстрактор на основе ORB (OpenCV)."""
     def __init__(self, nfeatures=500):
         self.orb = cv2.ORB_create(nfeatures=nfeatures)
 
@@ -42,13 +36,12 @@ class ORBExtractor(BaseFeatureExtractor):
 class CNNExtractor(BaseFeatureExtractor):
     def __init__(self, model_name='resnet18', grid=3):
         super().__init__()
-        self.grid = grid   # 3x3 = 9 патчей на картинку
+        self.grid = grid
         if model_name == 'resnet18':
             model = models.resnet18(pretrained=True)
             self.model = torch.nn.Sequential(*list(model.children())[:-1])
         elif model_name == 'vgg16':
             model = models.vgg16(pretrained=True)
-            # AdaptiveAvgPool, чтобы не зависеть от размера патча
             self.model = torch.nn.Sequential(
                 model.features,
                 torch.nn.AdaptiveAvgPool2d((1, 1))
@@ -78,5 +71,5 @@ class CNNExtractor(BaseFeatureExtractor):
             return np.array([])
         batch = torch.stack([self.transform(p) for p in patches])
         with torch.no_grad():
-            feats = self.model(batch).flatten(1)   # (grid*grid, D)
+            feats = self.model(batch).flatten(1) 
         return feats.numpy()

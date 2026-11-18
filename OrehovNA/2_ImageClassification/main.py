@@ -55,7 +55,7 @@ def main():
     # ---------- TRAIN ----------
     if args.mode == 'train':
         print(f"[train] Загрузка списка файлов из {args.data}...")
-        paths, labels, class_names = load_split(args.data, include_other=True)
+        paths, labels, class_names = load_split(args.data)
         print(f"  всего изображений: {len(paths)}")
         print(f"  классов: {len(class_names)}")
         for i, c in enumerate(class_names):
@@ -81,10 +81,9 @@ def main():
     # ---------- TEST ----------
     elif args.mode == 'test':
         print(f"[test] Загрузка {args.data}...")
-        paths, labels, _ = load_split(args.data, include_other=True)
+        paths, labels, _ = load_split(args.data)
         print(f"  тестовых изображений: {len(paths)}")
 
-        # Восстанавливаем экстрактор по сохранённому method_name — исключаем рассинхрон
         with open(args.bow, 'rb') as f:
             method_saved = pickle.load(f).get('method_name', args.method)
         extractor = get_extractor(method_saved)
@@ -125,13 +124,21 @@ def main():
             print(f"  {class_names[i]:45s}  p={proba[i]:.3f}")
 
         if args.plot:
-            plot_histogram(img, hist.flatten(),
-                           save_path=os.path.splitext(args.image)[0] + '_bow.png',
-                           title=class_names[pred_idx])
+            out_dir = os.path.join('saved', 'predictions', method_saved)
+            os.makedirs(out_dir, exist_ok=True)
+
+            base = os.path.splitext(os.path.basename(args.image))[0]
+            pred_class = class_names[pred_idx]
+
+            bow_path = os.path.join(out_dir, f"{base}__pred-{pred_class}_bow.png")
+            plot_histogram(img, hist.flatten(), save_path=bow_path,
+                        title=pred_class)
+
             if method_saved in ('sift', 'orb'):
-                draw_keypoints(img, extractor,
-                               save_path=os.path.splitext(args.image)[0] + '_kp.png')
-            print("Визуализация сохранена рядом с изображением.")
+                kp_path = os.path.join(out_dir, f"{base}__pred-{pred_class}_kp.png")
+                draw_keypoints(img, extractor, save_path=kp_path)
+
+            print(f"Визуализация сохранена в {out_dir}\\")
 
 
 if __name__ == '__main__':

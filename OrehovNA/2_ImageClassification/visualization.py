@@ -2,12 +2,11 @@
 import cv2
 import numpy as np
 import matplotlib
-matplotlib.use('Agg')   # не требует GUI, работает на серверах/в ноутбуках без дисплея
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 
 def plot_histogram(image, histogram, save_path=None, title=None):
-    """Совместный вывод: изображение + его BoW-гистограмма."""
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
     axes[0].imshow(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
@@ -28,7 +27,6 @@ def plot_histogram(image, histogram, save_path=None, title=None):
 
 
 def draw_keypoints(image, extractor, save_path=None):
-    """Полезно для отладки SIFT/ORB: показывает, где нашлись признаки."""
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     if hasattr(extractor, 'sift'):
         kp = extractor.sift.detect(gray, None)
