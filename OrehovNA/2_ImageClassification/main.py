@@ -1,29 +1,14 @@
 # main.py
 import argparse
 import os
-import cv2
-import numpy as np
 import pickle
+import numpy as np
 
-from feature_extractor import SIFTExtractor, ORBExtractor, CNNExtractor
+from feature_extractor import BaseFeatureExtractor
 from bag_of_words import BagOfWords
 from classifier import Classifier
-from dataset import load_split
+from dataset import load_dataset, Dataset
 from visualization import plot_histogram, draw_keypoints
-from io_utils import imread_unicode
-
-
-def get_extractor(name):
-    name = name.lower()
-    if name == 'sift':
-        return SIFTExtractor()
-    if name == 'orb':
-        return ORBExtractor()
-    if name == 'resnet18':
-        return CNNExtractor('resnet18')
-    if name == 'vgg16':
-        return CNNExtractor('vgg16')
-    raise ValueError(f"Неизвестный метод: {name}")
 
 
 def save_class_names(path, names):
@@ -42,101 +27,125 @@ def main():
     ap.add_argument('--data', help='Путь до trainval/ или test/')
     ap.add_argument('--model', default='model.pkl')
     ap.add_argument('--bow', default='bow.pkl')
-    ap.add_argument('--classes', default='classes.pkl', help='Файл с именами классов')
+    ap.add_argument('--classes', default='classes.pkl')
     ap.add_argument('--method', default='sift',
-                    help='sift | orb | resnet18 | vgg16 (игнорируется в test/predict, '
-                         'если метод сохранён в bow.pkl)')
+                    choices=BaseFeatureExtractor.available_methods())
     ap.add_argument('--vocab_size', type=int, default=200)
-    ap.add_argument('--image', help='Картинка для режима predict')
-    ap.add_argument('--plot', action='store_true',
-                    help='Сохранить визуализацию гистограммы в режиме predict')
+    ap.add_argument('--image', help='Картинка для predict')
+    ap.add_argument('--plot', action='store_true')
+
+    ap.add_argument('--grid', type=int, default=4)
+    ap.add_argument('--layer', default=None)
+    ap.add_argument('--transform-size', type=int, default=None)
+    ap.add_argument('--gem', action='store_true')
+    ap.add_argument('--balanced', action='store_true')
+    ap.add_argument('--C', type=float, default=1.0)
+
     args = ap.parse_args()
+
+    def make_extractor(method: str) -> BaseFeatureExtractor:
+        return BaseFeatureExtractor.create(
+            method,
+            grid=args.grid,
+            layer=args.layer,
+            transform_size=args.transform_size,
+        )
 
     # ---------- TRAIN ----------
     if args.mode == 'train':
-        print(f"[train] Загрузка списка файлов из {args.data}...")
-        paths, labels, class_names = load_split(args.data)
-        print(f"  всего изображений: {len(paths)}")
-        print(f"  классов: {len(class_names)}")
-        for i, c in enumerate(class_names):
-            print(f"    [{i}] {c}")
+        for p in (args.bow, args.model, args.classes):
+            parent = os.path.dirname(p)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
 
-        extractor = get_extractor(args.method)
-        bow = BagOfWords(args.vocab_size, extractor, method_name=args.method)
-        print("[train] Построение словаря BoW...")
-        bow.fit(paths, max_descriptors=300_000)
+        print(f"[train] Загрузка {args.data}...")
+        train_ds = load_dataset(args.data, include_other=True)
+        print(f"  изображений: {len(train_ds)}, классов: {len(train_ds.class_names)}")
 
-        print("[train] Преобразование trainval в гистограммы...")
-        X = bow.transform_batch(paths)
+        extractor = make_extractor(args.method)
+        bow = BagOfWords(
+            vocabulary_size=args.vocab_size,
+            feature_extractor=extractor,
+            method_name=args.method,
+            gem_pooling=args.gem,
+        )
+
+        if not args.gem:
+            print("[train] Построение словаря BoW...")
+            bow.fit(train_ds, max_descriptors=300_000)
+        else:
+            print("[train] GeM pooling: словарь не строится")
+            bow.is_fitted = True
+
+        print("[train] Преобразование trainval в признаки...")
+        X = bow.transform_dataset(train_ds)
 
         print("[train] Обучение SVM...")
-        clf = Classifier(kernel='linear', C=1.0)
-        clf.train(X, labels)
+        cw = 'balanced' if args.balanced else None
+        clf = Classifier(kernel='linear', C=args.C, class_weight=cw)
+        clf.train(X, train_ds.labels)
 
         bow.save(args.bow)
         clf.save(args.model)
-        save_class_names(args.classes, class_names)
-        print(f"[train] Готово. Сохранено: {args.bow}, {args.model}, {args.classes}")
+        save_class_names(args.classes, train_ds.class_names)
+        print(f"[train] Готово: {args.bow}, {args.model}, {args.classes}")
 
     # ---------- TEST ----------
     elif args.mode == 'test':
         print(f"[test] Загрузка {args.data}...")
-        paths, labels, _ = load_split(args.data)
-        print(f"  тестовых изображений: {len(paths)}")
+        test_ds = load_dataset(args.data, include_other=True)
+        print(f"  изображений: {len(test_ds)}")
 
         with open(args.bow, 'rb') as f:
             method_saved = pickle.load(f).get('method_name', args.method)
-        extractor = get_extractor(method_saved)
         print(f"  метод извлечения (из bow.pkl): {method_saved}")
 
-        bow = BagOfWords(feature_extractor=extractor).load(args.bow)
+        bow = BagOfWords(feature_extractor=make_extractor(method_saved)).load(args.bow)
         clf = Classifier().load(args.model)
 
         print("[test] Извлечение признаков...")
-        X = bow.transform_batch(paths)
+        X = bow.transform_dataset(test_ds)
         print("[test] Метрики:")
-        clf.evaluate(X, labels)
+        clf.evaluate(X, test_ds.labels)
 
     # ---------- PREDICT ----------
     else:
         if not args.image:
             raise SystemExit("Для --mode predict нужен --image")
+
         with open(args.bow, 'rb') as f:
             method_saved = pickle.load(f).get('method_name', args.method)
-        extractor = get_extractor(method_saved)
-        bow = BagOfWords(feature_extractor=extractor).load(args.bow)
+        bow = BagOfWords(feature_extractor=make_extractor(method_saved)).load(args.bow)
         clf = Classifier().load(args.model)
         class_names = load_class_names(args.classes)
 
-        img = imread_unicode(args.image)
-        if img is None:
-            raise FileNotFoundError(args.image)
+        img = Dataset.read_one(args.image)
 
-        hist = bow.transform(img, strict=True).reshape(1, -1)
-        proba = clf.model.predict_proba(hist)[0]
+        feat = bow.transform(img).reshape(1, -1)
+        proba = clf.model.predict_proba(feat)[0]
         pred_idx = int(np.argmax(proba))
 
         print(f"\nИзображение: {args.image}")
         print(f"Предсказание: {class_names[pred_idx]}")
         print("Топ-5 классов:")
-        order = np.argsort(proba)[::-1][:5]
-        for i in order:
+        for i in np.argsort(proba)[::-1][:5]:
             print(f"  {class_names[i]:45s}  p={proba[i]:.3f}")
 
         if args.plot:
             out_dir = os.path.join('saved', 'predictions', method_saved)
             os.makedirs(out_dir, exist_ok=True)
-
             base = os.path.splitext(os.path.basename(args.image))[0]
             pred_class = class_names[pred_idx]
 
-            bow_path = os.path.join(out_dir, f"{base}__pred-{pred_class}_bow.png")
-            plot_histogram(img, hist.flatten(), save_path=bow_path,
-                        title=pred_class)
+            plot_histogram(img, feat.flatten(),
+                           save_path=os.path.join(out_dir,
+                                                  f"{base}__pred-{pred_class}_bow.png"),
+                           title=pred_class)
 
-            if method_saved in ('sift', 'orb'):
-                kp_path = os.path.join(out_dir, f"{base}__pred-{pred_class}_kp.png")
-                draw_keypoints(img, extractor, save_path=kp_path)
+            if method_saved in ('sift', 'orb', 'kaze'):
+                draw_keypoints(img, make_extractor(method_saved),
+                               save_path=os.path.join(out_dir,
+                                                      f"{base}__pred-{pred_class}_kp.png"))
 
             print(f"Визуализация сохранена в {out_dir}\\")
 

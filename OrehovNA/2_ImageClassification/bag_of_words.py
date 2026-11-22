@@ -1,30 +1,31 @@
 # bag_of_words.py
-import cv2
 import numpy as np
-from io_utils import imread_unicode
 import pickle
 from sklearn.cluster import MiniBatchKMeans
 from sklearn.preprocessing import normalize
 
 
 class BagOfWords:
-    def __init__(self, vocabulary_size=200, feature_extractor=None, method_name=None):
+    def __init__(self, vocabulary_size=200, feature_extractor=None,
+                 method_name=None, gem_pooling=False):
         self.vocabulary_size = vocabulary_size
         self.extractor = feature_extractor
         self.method_name = method_name
+        self.gem_pooling = gem_pooling
         self.kmeans = None
         self.is_fitted = False
 
-    def fit(self, image_paths, max_descriptors=500_000, seed=42):
+    def fit(self, dataset, max_descriptors=300_000, seed=42):
+        """
+        dataset: Dataset — читает изображения лениво через __getitem__.
+        """
         rng = np.random.default_rng(seed)
-
-        shuffled = list(image_paths)
-        rng.shuffle(shuffled)
+        order = rng.permutation(len(dataset))
 
         total = 0
         chunks = []
-        for path in shuffled:
-            img = imread_unicode(path)
+        for idx in order:
+            img, _ = dataset[idx]
             if img is None:
                 continue
             desc = self.extractor.extract(img)
@@ -36,8 +37,7 @@ class BagOfWords:
                 break
 
         if not chunks:
-            raise ValueError("Не удалось извлечь ни одного дескриптора. "
-                             "Проверьте, что пути корректны и изображения не битые.")
+            raise ValueError("Не удалось извлечь ни одного дескриптора.")
 
         all_desc = np.vstack(chunks)
         if len(all_desc) > max_descriptors:
@@ -56,33 +56,34 @@ class BagOfWords:
               f"дескрипторов {len(all_desc)}")
         return self
 
-    def _extract(self, image_input):
-        """Возвращает (img_bgr, descriptors) или (None, None) если не прочитать."""
-        if isinstance(image_input, str):
-            img = imread_unicode(image_input)
-        else:
-            img = image_input
-        if img is None:
-            return None, None
-        return img, self.extractor.extract(img)
+    def _gem(self, X: np.ndarray, p: float = 3.0) -> np.ndarray:
+        X = np.clip(X, 1e-6, None)
+        pooled = np.power(np.mean(np.power(X, p), axis=0), 1.0 / p)
+        return normalize(pooled.reshape(1, -1), norm='l2').flatten()
 
-    def transform(self, image_input, strict=False) -> np.ndarray:
+    def transform(self, img: np.ndarray) -> np.ndarray:
+        """Принимает уже прочитанное изображение (не путь)."""
         if not self.is_fitted:
             raise RuntimeError("Сначала вызовите fit().")
-        img, desc = self._extract(image_input)
-        if img is None:
-            if strict:
-                raise FileNotFoundError(image_input)
-            print(f"[BoW][skip] не удалось прочитать: {image_input}")
-            return np.zeros(self.vocabulary_size)
+        desc = self.extractor.extract(img)
         if desc.size == 0:
             return np.zeros(self.vocabulary_size)
+        if self.gem_pooling:
+            return self._gem(desc)
         labels = self.kmeans.predict(desc)
         hist, _ = np.histogram(labels, bins=np.arange(self.vocabulary_size + 1))
         return normalize(hist.reshape(1, -1), norm='l2').flatten()
-    
-    def transform_batch(self, image_paths) -> np.ndarray:
-        return np.array([self.transform(p) for p in image_paths])
+
+    def transform_dataset(self, dataset) -> np.ndarray:
+        """Проходит по датасету, читая через __getitem__."""
+        features = []
+        for i in range(len(dataset)):
+            img, _ = dataset[i]
+            if img is None:
+                features.append(np.zeros(self.vocabulary_size))
+                continue
+            features.append(self.transform(img))
+        return np.array(features)
 
     def save(self, path):
         with open(path, 'wb') as f:
@@ -90,6 +91,7 @@ class BagOfWords:
                 'kmeans': self.kmeans,
                 'size': self.vocabulary_size,
                 'method_name': self.method_name,
+                'gem_pooling': self.gem_pooling,
                 'is_fitted': self.is_fitted,
             }, f)
 
@@ -99,5 +101,6 @@ class BagOfWords:
         self.kmeans = data['kmeans']
         self.vocabulary_size = data['size']
         self.method_name = data.get('method_name')
+        self.gem_pooling = data.get('gem_pooling', False)
         self.is_fitted = data['is_fitted']
         return self

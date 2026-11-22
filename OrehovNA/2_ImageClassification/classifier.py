@@ -3,12 +3,17 @@ from sklearn.svm import SVC
 from sklearn.metrics import accuracy_score, classification_report
 import pickle
 
+
 class Classifier:
-    def __init__(self, kernel='linear', C=1.0):
-        self.model = SVC(kernel=kernel, C=C, probability=True, random_state=42)
+    def __init__(self, kernel='linear', C=1.0, class_weight=None):
+        """
+        class_weight='balanced' — компенсация дисбаланса классов.
+        Крайне рекомендован для этого датасета (соотношение 19:1).
+        """
+        self.model = SVC(kernel=kernel, C=C, probability=True,
+                         class_weight=class_weight, random_state=42)
 
     def train(self, X_train, y_train):
-        """X_train: (n_samples, vocab_size), y_train: метки классов."""
         self.model.fit(X_train, y_train)
         return self
 
