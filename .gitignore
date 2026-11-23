@@ -219,3 +219,5 @@ __marimo__/
 
 
 OrehovNA/2_ImageClassification/Dataset/
+OrehovNA/2_ImageClassification/Dataset/
+*.pkl

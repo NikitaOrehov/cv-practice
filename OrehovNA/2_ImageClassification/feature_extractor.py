@@ -16,13 +16,26 @@ class BaseFeatureExtractor(ABC):
             BaseFeatureExtractor._registry[register_name] = cls
 
     @classmethod
-    def create(cls, name: str, **kwargs) -> "BaseFeatureExtractor":
+    def create(cls, name: str, grid: int = 4, layer: str | None = None,
+              transform_size: int | None = None, **extra) -> "BaseFeatureExtractor":
         normalized = name.lower()
         if normalized not in cls._registry:
             available = ", ".join(sorted(cls._registry))
-            raise ValueError(
-                f"Unknown extractor '{name}'. Available: {available}"
-            )
+            raise ValueError(f"Unknown extractor '{name}'. Available: {available}")
+
+        if normalized in ('sift', 'orb', 'kaze'):
+            return cls._registry[normalized](**extra)
+
+        kwargs = {'grid': grid}
+        if layer is not None:
+            kwargs['layer_name'] = layer
+        if transform_size is not None:
+            kwargs['transform_cfg'] = {
+                'size': (transform_size, transform_size),
+                'mean': [0.485, 0.456, 0.406],
+                'std':  [0.229, 0.224, 0.225],
+            }
+        kwargs.update(extra)
         return cls._registry[normalized](**kwargs)
 
     @classmethod
@@ -87,6 +100,8 @@ class KAZEExtractor(ClassicalExtractor, register_name="kaze"):
         return 64
 
 
+
+
 DEFAULT_TRANSFORM_CFG = {
     'resnet18': {'size': (224, 224),
                  'mean': [0.485, 0.456, 0.406],
@@ -97,13 +112,22 @@ DEFAULT_TRANSFORM_CFG = {
     'vgg16':    {'size': (224, 224),
                  'mean': [0.485, 0.456, 0.406],
                  'std':  [0.229, 0.224, 0.225]},
+    'convnext_base': {'size': (224, 224),
+                      'mean': [0.485, 0.456, 0.406],
+                      'std':  [0.229, 0.224, 0.225]},
+    'dinov2':   {'size': (224, 224),
+                 'mean': [0.485, 0.456, 0.406],
+                 'std':  [0.229, 0.224, 0.225]},
 }
 
 DEFAULT_LAYER = {
     'resnet18': 'layer3',
     'resnet50': 'layer3',
     'vgg16':    'features',
+    'convnext_base': 'avgpool',
+    'dinov2':   'norm',
 }
+
 
 
 class NeuralExtractor(BaseFeatureExtractor, ABC):
@@ -245,3 +269,77 @@ class VGG16Extractor(NeuralExtractor, register_name="vgg16"):
     def descriptor_dim(self) -> int:
         return {'conv3_3': 256, 'conv4_3': 512, 'conv5_3': 512,
                 'features': 512}.get(self.layer_name, -1)
+
+class ConvNeXtBaseExtractor(NeuralExtractor, register_name="convnext_base"):
+    def __init__(self, model_name='convnext_base', **kwargs):
+        super().__init__(model_name, **kwargs)
+
+    def _build_model(self):
+        base = models.convnext_base(weights=models.ConvNeXt_Base_Weights.DEFAULT)
+        # Берем features + avgpool, без финального классификатора
+        return torch.nn.Sequential(
+            base.features,
+            base.avgpool,
+        )
+
+    def _resolve_layer(self):
+        if self.layer_name == 'avgpool':
+            return self.model[1]
+        if self.layer_name == 'stage3':
+            return self.model[0][5]
+        if self.layer_name == 'stage4':
+            return self.model[0][7]
+        raise ValueError(f"Неподдерживаемый слой ConvNeXt: {self.layer_name}")
+
+    @property
+    def descriptor_dim(self) -> int:
+        return {'stage3': 512, 'stage4': 1024, 'avgpool': 1024}.get(self.layer_name, -1)
+
+
+class DINOv2Extractor(NeuralExtractor, register_name="dinov2"):
+    """
+    Визуальный трансформер DINOv2 (ViT-B/14) от Meta AI.
+    Идеально подходит для поиска и классификации достопримечательностей.
+    """
+    def __init__(self, model_name='dinov2', **kwargs):
+        super().__init__(model_name, **kwargs)
+
+    def _build_model(self):
+        return torch.hub.load('facebookresearch/dinov2', 'dinov2_vitb14')
+
+    def _resolve_layer(self):
+        if self.layer_name == 'norm':
+            return self.model.norm
+        raise ValueError(f"Неподдерживаемый слой DINOv2: {self.layer_name}")
+
+    def extract(self, image: np.ndarray) -> np.ndarray:
+        # Переопределяем extract, т.к. ViT возвращает 3D-тензор (B, N_tokens, 768),
+        # где 0-й токен — это глобальный CLS-токен патча.
+        h, w = image.shape[:2]
+        ph, pw = h // self.grid, w // self.grid
+        if ph == 0 or pw == 0:
+            return np.array([])
+
+        patches = []
+        for i in range(self.grid):
+            for j in range(self.grid):
+                patch = image[i*ph:(i+1)*ph, j*pw:(j+1)*pw]
+                if patch.size == 0:
+                    continue
+                patches.append(cv2.cvtColor(patch, cv2.COLOR_BGR2RGB))
+        if not patches:
+            return np.array([])
+
+        batch = torch.stack([self.transform(p) for p in patches]).to(self.device)
+        with torch.no_grad():
+            _ = self.model(batch)
+        feats = self._captured
+        if feats is None:
+            raise RuntimeError("Forward hook не сработал для DINOv2")
+        # Берем CLS-токен (индекс 0 по оси токенов) -> (num_patches, 768)
+        cls_feats = feats[:, 0, :]
+        return cls_feats.cpu().numpy().astype(np.float32)
+
+    @property
+    def descriptor_dim(self) -> int:
+        return 768
