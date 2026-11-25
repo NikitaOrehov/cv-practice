@@ -75,10 +75,6 @@ def _discover_classes(scan_paths):
 
 
 def load_dataset(root_dir: str, include_other: bool = True) -> Dataset:
-    """
-    Загружает trainval/ или test/ с объединением NNSUDataset + ExtDataset.
-    Дедупликация по realpath (Windows + регистронезависимая ФС).
-    """
     scan_paths = [os.path.join(root_dir, s)
                   for s in SUBDATASETS
                   if os.path.isdir(os.path.join(root_dir, s))]
@@ -110,5 +106,4 @@ def load_dataset(root_dir: str, include_other: bool = True) -> Dataset:
 
 
 def load_split(root_dir: str, include_other: bool = True) -> Dataset:
-    """Алиас для обратной совместимости."""
     return load_dataset(root_dir, include_other)

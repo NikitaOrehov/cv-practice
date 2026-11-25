@@ -16,9 +16,6 @@ class BagOfWords:
         self.is_fitted = False
 
     def fit(self, dataset, max_descriptors=300_000, seed=42):
-        """
-        dataset: Dataset — читает изображения лениво через __getitem__.
-        """
         rng = np.random.default_rng(seed)
         order = rng.permutation(len(dataset))
 
